@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, LongTensor
 import re
-from datasets import load_dataset
 
 class PreProcessing:
   def __init__(self):
@@ -16,7 +15,7 @@ class PreProcessing:
     corpus = []
     for row in dataset:
       text = re.sub(r'[^a-zA-Z ]', "", row)
-      if text: corpus.append(text)
+      if text: corpus.append(text.lower())
 
     print(f'Length of Corpus: {len(corpus)}')
     return corpus
@@ -60,9 +59,9 @@ class PreProcessing:
 class Model:
   def __init__(self):
     self.preprocessing = PreProcessing()
-    self.embedding_dims = 100
-    self.num_epochs = 50
-    self.learning_rate = 0.1
+    self.embedding_dims = 300
+    self.num_epochs = 1
+    self.learning_rate = 0.001
 
     self.GPU_NUM = 0
 
@@ -74,8 +73,8 @@ class Model:
     self.preprocessing.make_vocabulary_list(corpus)
     self.preprocessing.make_center_context_word_pairs()
     self.vocabulary_size = self.preprocessing.vocabulary_size
-    self.W1 = Tensor(torch.randn(self.embedding_dims, self.vocabulary_size).float()) # initialize with random number (size: embedding_dims * vocabulary_size)
-    self.W2 = Tensor(torch.randn(self.vocabulary_size, self.embedding_dims).float()) # initialize with random number (size: vocabulary_size * embedding_dims)
+    self.W1 = Tensor(torch.randn(self.embedding_dims, self.vocabulary_size).float()).cuda() # initialize with random number (size: embedding_dims * vocabulary_size)
+    self.W2 = Tensor(torch.randn(self.vocabulary_size, self.embedding_dims).float()).cuda() # initialize with random number (size: vocabulary_size * embedding_dims)
     self.W1.requires_grad_()
     self.W2.requires_grad_()
 
@@ -89,8 +88,8 @@ class Model:
     for epo in range(self.num_epochs):
       loss_val = 0
       for idx, (data, target) in enumerate(idx_pairs):
-        x = Tensor(self.get_input_layer(data)).float() # one-hot vector
-        y_true = LongTensor(torch.from_numpy(np.array([target])).long())
+        x = Tensor(self.get_input_layer(data)).float().cuda() # one-hot vector
+        y_true = LongTensor(torch.from_numpy(np.array([target])).long()).cuda()
 
         z1 = torch.matmul(self.W1, x)
         z2 = torch.matmul(self.W2, z1)
@@ -108,18 +107,15 @@ class Model:
         if (idx+1) % 10000 == 0:
           print(f'[{datetime.datetime.now().time()}] Epoch {epo+1} - Row {idx+1}')
       print(f'[{datetime.datetime.now().time()}] Loss at Epoch {epo+1}: {loss_val/len(idx_pairs)}')
-      if self.learning_rate >= 0.001: self.learning_rate = self.learning_rate * 0.96
 
 start = datetime.datetime.now()
+print(f'Start at: {start}')
 
-dataset = load_dataset('wikitext', 'wikitext-2-raw-v1')['train']
-dataset = dataset.filter(lambda sample: 'king' in sample['text'] or 
-                                        'queen' in sample['text'] or 
-                                        'man' in sample['text'] or 
-                                        'woman' in sample['text'])[:150]
+corpus_file = open('training-monolingual/news.2011.en.shuffled', 'r')
+corpus = corpus_file.readlines()
 
 model = Model()
-model.prepare_corpus(dataset['text'])
+model.prepare_corpus(corpus[:100000])
 model.train()
 
 def similarity(model, v, u):
@@ -128,16 +124,28 @@ def similarity(model, v, u):
 word1 = 'king'
 word2 = 'man'
 word3 = 'woman'
-wv1 = torch.matmul(model.W1,model.get_input_layer(model.preprocessing.word2idx[word1]))
-wv2 = torch.matmul(model.W1,model.get_input_layer(model.preprocessing.word2idx[word2]))
-wv3 = torch.matmul(model.W1,model.get_input_layer(model.preprocessing.word2idx[word3]))
-wv4 = wv1 - wv2 + wv3
+# word4 = 'queen'
 
-similarities = {}
-for word in model.preprocessing.vocabulary:
-  wv = torch.matmul(model.W1,model.get_input_layer(model.preprocessing.word2idx[word]))
-  similarities[word] = similarity(model, wv4, wv)
+with torch.no_grad():
+  x1 = Tensor(model.get_input_layer(model.preprocessing.word2idx[word1])).float().cuda()
+  x2 = Tensor(model.get_input_layer(model.preprocessing.word2idx[word2])).float().cuda()
+  x3 = Tensor(model.get_input_layer(model.preprocessing.word2idx[word3])).float().cuda()
 
-max_word = max(similarities.keys(), key=(lambda k: similarities[k]))
-print(max_word)
-print(f'Elapsed Time: {datetime.datetime.now() - start}')
+  wv1 = torch.matmul(model.W1, x1)
+  wv2 = torch.matmul(model.W1, x2)
+  wv3 = torch.matmul(model.W1, x3)
+  wv4 = wv1 - wv2 + wv3
+
+  max_similarity = -999999
+  max_word = ''
+  for word in model.preprocessing.vocabulary:
+    x = Tensor(model.get_input_layer(model.preprocessing.word2idx[word])).float().cuda()
+    wv = torch.matmul(model.W1, x)
+    similarity = F.cosine_similarity(wv4, wv, dim=0).cpu()
+    if similarity > max_similarity: max_word = word
+
+    del x, wv, similarity
+    torch.cuda.empty_cache()
+
+  print(max_word)
+  print(f'Elapsed Time: {datetime.datetime.now() - start}')
